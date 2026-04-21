@@ -20,9 +20,43 @@ const transporter = nodemailer.createTransport({
   },
 });
 
-// メッセージ履歴の管理
-const messageHistory = new Map<string, { text: string; timestamp: string }[]>();
+type HistoryEntry = {
+  text: string;
+  timestamp: string;
+  kind: "message" | "follow-parameter";
+};
+
+// メッセージ履歴の管理（会話履歴 + 友だち追加時パラメーター）
+const messageHistory = new Map<string, HistoryEntry[]>();
 const pendingApprovals = new Map<string, { text: string; timestamp: string }>();
+
+function ensureHistory(userId: string): HistoryEntry[] {
+  if (!messageHistory.has(userId)) {
+    messageHistory.set(userId, []);
+  }
+  return messageHistory.get(userId)!;
+}
+
+function extractFollowParameter(event: WebhookEvent): string | undefined {
+  const rawEvent = event as any;
+
+  // 友だち追加時パラメーターは利用経路ごとに格納位置が異なる可能性があるため、
+  // よく使われる候補を順番に探索する。
+  const candidates = [
+    rawEvent?.follow?.parameter,
+    rawEvent?.follow?.params?.parameter,
+    rawEvent?.follow?.referral?.parameter,
+    rawEvent?.follow?.referrer?.parameter,
+    rawEvent?.parameter,
+  ];
+
+  for (const candidate of candidates) {
+    if (typeof candidate === "string" && candidate.trim().length > 0) {
+      return candidate.trim();
+    }
+  }
+  return undefined;
+}
 
 // 電話番号検出用の正規表現（基本的な形式）
 function isValidPhoneNumber(number: string): boolean {
@@ -99,22 +133,45 @@ app.post("/webhook", middleware(config), async (req: any, res) => {
 async function handleEvent(event: WebhookEvent) {
   console.log("イベント処理開始:", JSON.stringify(event, null, 2));
 
+  if (!event.source?.userId) {
+    console.log("userIdがないイベントをスキップ");
+    return;
+  }
+  const userId = event.source.userId;
+
+  if (event.type === "follow") {
+    const timestamp = new Date(event.timestamp).toISOString();
+    const followParameter = extractFollowParameter(event);
+
+    if (followParameter) {
+      ensureHistory(userId).push({
+        text: followParameter,
+        timestamp,
+        kind: "follow-parameter",
+      });
+      console.log("友だち追加パラメーターを保存:", {
+        userId,
+        followParameter,
+        timestamp,
+      });
+    } else {
+      console.log("友だち追加イベント（パラメーターなし）:", { userId, timestamp });
+    }
+    return;
+  }
+
   if (event.type !== "message" || event.message.type !== "text") {
     console.log("テキストメッセージ以外のイベントをスキップ");
     return;
   }
 
-  const userId = event.source.userId || "";
   const text = event.message.text;
   const timestamp = new Date(event.timestamp).toISOString();
 
   console.log("メッセージを受信:", { userId, text, timestamp });
 
   // メッセージを履歴に追加
-  if (!messageHistory.has(userId)) {
-    messageHistory.set(userId, []);
-  }
-  messageHistory.get(userId)?.push({ text, timestamp });
+  ensureHistory(userId).push({ text, timestamp, kind: "message" });
 
   // 承認応答の処理
   if (text === "はい、大丈夫です") {
@@ -305,7 +362,12 @@ function formatMailBody(userId: string): string {
   if (!history) return "";
 
   return `[ID] : ${userId}\n\n=== メッセージ履歴 ===\n${history
-    .map((msg) => `[${msg.timestamp}]\n${msg.text}\n`)
+    .map((entry) => {
+      if (entry.kind === "follow-parameter") {
+        return `[${entry.timestamp}] [友だち追加パラメーター]\n${entry.text}\n`;
+      }
+      return `[${entry.timestamp}]\n${entry.text}\n`;
+    })
     .join("\n")}`;
 }
 
