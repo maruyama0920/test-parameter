@@ -43,6 +43,7 @@ function extractFollowParameter(event: WebhookEvent): string | undefined {
   // 友だち追加時パラメーターは利用経路ごとに格納位置が異なる可能性があるため、
   // よく使われる候補を順番に探索する。
   const candidates = [
+    rawEvent?.follow?.referral?.ref,
     rawEvent?.follow?.parameter,
     rawEvent?.follow?.params?.parameter,
     rawEvent?.follow?.referral?.parameter,
